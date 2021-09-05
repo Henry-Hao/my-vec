@@ -54,6 +54,34 @@ impl<T> MyVec<T> {
         };
         self.cap = new_cap;
     }
+
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn push(&mut self, ele: T) {
+        if self.len == self.cap { self.grow(); }
+        unsafe {
+            std::ptr::write(self.ptr.as_ptr().add(self.len), ele);
+        }
+
+        self.len += 1;
+    }
+
+    pub fn pop(&mut self) -> Option<T> {
+        if self.len == 0 {
+            None
+        } else {
+            self.len -= 1;
+            unsafe {
+                Some(std::ptr::read(self.ptr.as_ptr().add(self.len)))
+            }
+        }
+    }
 }
 
 
@@ -70,5 +98,25 @@ mod tests {
     fn create_new_fail() {
         let v:MyVec<()> = MyVec::new();
         assert!(std::mem::size_of_val(&v) == 0);
+    }
+
+    #[test]
+    fn push() {
+        let mut v: MyVec<i32> = MyVec::new();
+        assert_eq!(v.len(), 0);
+        v.push(1);
+        assert_eq!(v.len(), 1);
+        v.push(2);
+        assert_eq!(v.len(), 2);
+    }
+
+    #[test]
+    fn pop() {
+        let mut v: MyVec<i32> = MyVec::new();
+        v.push(1);
+        v.push(2);
+        assert_eq!(v.pop(), Some(2));
+        assert_eq!(v.pop(), Some(1));
+        assert_eq!(v.pop(), None);
     }
 }
