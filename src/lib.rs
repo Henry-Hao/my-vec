@@ -1,3 +1,4 @@
+use std::ops::{Deref, DerefMut};
 use std::{marker::PhantomData, ptr::NonNull};
 use std::alloc;
 
@@ -55,14 +56,6 @@ impl<T> MyVec<T> {
         self.cap = new_cap;
     }
 
-    pub const fn len(&self) -> usize {
-        self.len
-    }
-
-    pub const fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
     pub fn push(&mut self, ele: T) {
         if self.len == self.cap { self.grow(); }
         unsafe {
@@ -80,6 +73,24 @@ impl<T> MyVec<T> {
             unsafe {
                 Some(std::ptr::read(self.ptr.as_ptr().add(self.len)))
             }
+        }
+    }
+}
+
+impl<T> Deref for MyVec<T> {
+    type Target = [T];
+
+    fn deref(&self) -> &Self::Target {
+        unsafe {
+            std::slice::from_raw_parts(self.ptr.as_ptr(), self.len)
+        }
+    }
+}
+
+impl<T> DerefMut for MyVec<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe {
+            std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len)
         }
     }
 }
@@ -131,5 +142,44 @@ mod tests {
         assert_eq!(v.pop(), Some(2));
         assert_eq!(v.pop(), Some(1));
         assert_eq!(v.pop(), None);
+    }
+
+    #[test]
+    fn deref_to_slice_inbound() {
+        let mut v: MyVec<i32> = MyVec::new();
+        v.push(1);
+        v.push(2);
+        v.push(3);
+        assert_eq!(v[2], 3);
+    }
+
+    #[test]
+    #[should_panic]
+    fn deref_to_slice_outbound() {
+        let mut v: MyVec<i32> = MyVec::new();
+        v.push(1);
+        v.push(2);
+        assert_eq!(v[2], 3);
+    }
+
+    #[test]
+    fn deref_mut_inbound() {
+        let mut v: MyVec<i32> = MyVec::new();
+        v.push(1);
+        v.push(2);
+        v.push(3);
+        v[1] = 4;
+        assert_eq!(v[2], 3);
+    }
+
+    #[test]
+    #[should_panic]
+    fn deref_mut_outbound() {
+        let mut v: MyVec<i32> = MyVec::new();
+        v.push(1);
+        v.push(2);
+        v.push(3);
+        v[4] = 4;
+        v.len()
     }
 }
