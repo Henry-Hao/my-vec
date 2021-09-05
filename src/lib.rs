@@ -2,29 +2,26 @@ use std::alloc;
 use std::ops::{Deref, DerefMut};
 use std::{marker::PhantomData, ptr::NonNull};
 
-pub struct MyVec<T> {
+struct RawVec<T> {
     /// 1. NonNull<T> will never be Null
     /// 2. NonNull<T> is covariant over T
     ptr: NonNull<T>,
     cap: usize,
-    len: usize,
     /// Pretending to own T for dropck later
     _marker: PhantomData<T>,
 }
+unsafe impl<T: Sync> Sync for RawVec<T> {}
+unsafe impl<T: Send> Send for RawVec<T> {}
 
-unsafe impl<T: Sync> Sync for MyVec<T> {}
-unsafe impl<T: Send> Send for MyVec<T> {}
-
-impl<T> MyVec<T> {
-    pub fn new() -> Self {
+impl<T> RawVec<T> {
+    fn new() -> Self {
         assert!(
             std::mem::align_of::<T>() != 0,
             "Zero-Sized-Types are not allowed to create Vec"
         );
-        MyVec {
+        RawVec {
             ptr: NonNull::dangling(),
             cap: 0,
-            len: 0,
             _marker: PhantomData,
         }
     }
@@ -57,13 +54,35 @@ impl<T> MyVec<T> {
         };
         self.cap = new_cap;
     }
+}
+
+pub struct MyVec<T> {
+    buf: RawVec<T>,
+    len: usize,
+}
+
+impl<T> MyVec<T> {
+    pub fn new() -> Self {
+        Self {
+            buf: RawVec::new(),
+            len: 0,
+        }
+    }
+
+    fn cap(&self) -> usize {
+        self.buf.cap
+    }
+
+    fn ptr(&self) -> *mut T {
+        self.buf.ptr.as_ptr()
+    }
 
     pub fn push(&mut self, ele: T) {
-        if self.len == self.cap {
-            self.grow();
+        if self.len == self.cap() {
+            self.buf.grow();
         }
         unsafe {
-            std::ptr::write(self.ptr.as_ptr().add(self.len), ele);
+            std::ptr::write(self.ptr().add(self.len), ele);
         }
 
         self.len += 1;
@@ -74,18 +93,18 @@ impl<T> MyVec<T> {
             None
         } else {
             self.len -= 1;
-            unsafe { Some(std::ptr::read(self.ptr.as_ptr().add(self.len))) }
+            unsafe { Some(std::ptr::read(self.ptr().add(self.len))) }
         }
     }
 
     pub fn insert(&mut self, idx: usize, ele: T) {
         assert!(idx <= self.len, "index out of bounds");
-        if self.len == self.cap {
-            self.grow();
+        if self.len == self.cap() {
+            self.buf.grow();
         }
         unsafe {
-            let ptr = self.ptr.as_ptr().add(idx);
-            let new_ptr = self.ptr.as_ptr().add(idx + 1);
+            let ptr = self.ptr().add(idx);
+            let new_ptr = self.ptr().add(idx + 1);
             let count = self.len - idx;
             std::ptr::copy(ptr, new_ptr, count);
             std::ptr::write(ptr, ele);
@@ -96,8 +115,8 @@ impl<T> MyVec<T> {
     pub fn remove(&mut self, idx: usize) -> T {
         assert!(idx < self.len, "index out of bounds");
         unsafe {
-            let ptr = self.ptr.as_ptr().add(idx + 1);
-            let new_ptr = self.ptr.as_ptr().add(idx);
+            let ptr = self.ptr().add(idx + 1);
+            let new_ptr = self.ptr().add(idx);
             let item = new_ptr.read();
             let count = self.len - idx - 1;
             std::ptr::copy(ptr, new_ptr, count);
@@ -107,23 +126,16 @@ impl<T> MyVec<T> {
     }
 
     pub fn into_iter(self) -> IntoIter<T> {
-        let ptr = self.ptr;
-        let len = self.len;
-        let cap = self.cap;
-
         unsafe {
-            // take ownership of self without running its destructor
+            let buf = std::ptr::read(&self.buf);
+            let len = self.len;
+
             std::mem::forget(self);
+            // take ownership of self without running its destructor
             IntoIter {
-                buf: ptr,
-                cap: cap,
-                start: ptr.as_ptr(),
-                end: if cap == 0 {
-                    ptr.as_ptr()
-                } else {
-                    ptr.as_ptr().add(len)
-                },
-                _marker: PhantomData,
+                start: buf.ptr.as_ptr(),
+                end: buf.ptr.as_ptr().add(len),
+                _buf: buf,
             }
         }
     }
@@ -133,38 +145,27 @@ impl<T> Deref for MyVec<T> {
     type Target = [T];
 
     fn deref(&self) -> &Self::Target {
-        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
+        unsafe { std::slice::from_raw_parts(self.ptr(), self.len) }
     }
 }
 
 impl<T> DerefMut for MyVec<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
+        unsafe { std::slice::from_raw_parts_mut(self.ptr(), self.len) }
     }
 }
 
 impl<T> Drop for MyVec<T> {
     fn drop(&mut self) {
-        // if self.cap == 0, nothing has been allocated
-        if self.cap != 0 {
-            // this could be removed when T:!Drop as in the elements don't need to be dropped
-            while let Some(_) = self.pop() {}
-            unsafe {
-                std::alloc::dealloc(
-                    self.ptr.as_ptr() as *mut u8,
-                    alloc::Layout::array::<T>(self.cap).unwrap(),
-                )
-            }
-        }
+        // this could be removed when T:!Drop as in the elements don't need to be dropped
+        while let Some(_) = self.pop() {}
     }
 }
 
 pub struct IntoIter<T> {
-    buf: NonNull<T>,
-    cap: usize,
+    _buf: RawVec<T>,
     start: *const T,
     end: *const T,
-    _marker: PhantomData<T>,
 }
 
 impl<T> Iterator for IntoIter<T> {
@@ -178,7 +179,6 @@ impl<T> Iterator for IntoIter<T> {
             Some(unsafe { std::ptr::read(self.start.sub(1)) })
         }
     }
-
 }
 
 impl<T> DoubleEndedIterator for IntoIter<T> {
@@ -191,17 +191,20 @@ impl<T> DoubleEndedIterator for IntoIter<T> {
         }
     }
 }
+impl<T> Drop for RawVec<T> {
+    fn drop(&mut self) {
+        if self.cap != 0 {
+            let layout = alloc::Layout::array::<T>(self.cap).unwrap();
+            unsafe {
+                alloc::dealloc(self.ptr.as_ptr() as *mut u8, layout);
+            }
+        }
+    }
+}
 
 impl<T> Drop for IntoIter<T> {
     fn drop(&mut self) {
-        if self.cap != 0 {
-            for _ in &mut *self {}
-            let layout = alloc::Layout::array::<T>(self.cap).unwrap();
-            unsafe {
-                alloc::dealloc(self.buf.as_ptr() as *mut u8, layout);
-            }
-
-        }
+        for _ in &mut *self {}
     }
 }
 
@@ -325,6 +328,5 @@ mod tests {
         assert_eq!(it.next(), Some(3));
         assert_eq!(it.next(), None);
         assert_eq!(it.next_back(), None);
-
     }
 }
