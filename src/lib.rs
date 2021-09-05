@@ -105,6 +105,28 @@ impl<T> MyVec<T> {
             return item;
         }
     }
+
+    pub fn into_iter(self) -> IntoIter<T> {
+        let ptr = self.ptr;
+        let len = self.len;
+        let cap = self.cap;
+
+        unsafe {
+            // take ownership of self without running its destructor
+            std::mem::forget(self);
+            IntoIter {
+                buf: ptr,
+                cap: cap,
+                start: ptr.as_ptr(),
+                end: if cap == 0 {
+                    ptr.as_ptr()
+                } else {
+                    ptr.as_ptr().add(len)
+                },
+                _marker: PhantomData,
+            }
+        }
+    }
 }
 
 impl<T> Deref for MyVec<T> {
@@ -133,6 +155,52 @@ impl<T> Drop for MyVec<T> {
                     alloc::Layout::array::<T>(self.cap).unwrap(),
                 )
             }
+        }
+    }
+}
+
+pub struct IntoIter<T> {
+    buf: NonNull<T>,
+    cap: usize,
+    start: *const T,
+    end: *const T,
+    _marker: PhantomData<T>,
+}
+
+impl<T> Iterator for IntoIter<T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.start == self.end {
+            None
+        } else {
+            self.start = unsafe { self.start.add(1) };
+            Some(unsafe { std::ptr::read(self.start.sub(1)) })
+        }
+    }
+
+}
+
+impl<T> DoubleEndedIterator for IntoIter<T> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.start == self.end {
+            None
+        } else {
+            self.end = unsafe { self.end.sub(1) };
+            Some(unsafe { std::ptr::read(self.end) })
+        }
+    }
+}
+
+impl<T> Drop for IntoIter<T> {
+    fn drop(&mut self) {
+        if self.cap != 0 {
+            for _ in &mut *self {}
+            let layout = alloc::Layout::array::<T>(self.cap).unwrap();
+            unsafe {
+                alloc::dealloc(self.buf.as_ptr() as *mut u8, layout);
+            }
+
         }
     }
 }
@@ -239,5 +307,24 @@ mod tests {
         v.push(1);
         v.push(2);
         v.remove(2);
+    }
+
+    #[test]
+    fn test_into_iter() {
+        let mut v: MyVec<i32> = MyVec::new();
+        v.push(1);
+        v.push(2);
+        v.push(3);
+        v.push(4);
+        v.push(5);
+        let mut it = v.into_iter();
+        assert_eq!(it.next(), Some(1));
+        assert_eq!(it.next(), Some(2));
+        assert_eq!(it.next_back(), Some(5));
+        assert_eq!(it.next_back(), Some(4));
+        assert_eq!(it.next(), Some(3));
+        assert_eq!(it.next(), None);
+        assert_eq!(it.next_back(), None);
+
     }
 }
