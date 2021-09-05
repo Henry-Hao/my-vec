@@ -1,7 +1,9 @@
 use std::alloc;
 use std::ops::{Deref, DerefMut};
+use std::slice::from_raw_parts;
 use std::{marker::PhantomData, ptr::NonNull};
 
+#[derive(Debug)]
 struct RawVec<T> {
     /// 1. NonNull<T> will never be Null
     /// 2. NonNull<T> is covariant over T
@@ -15,18 +17,17 @@ unsafe impl<T: Send> Send for RawVec<T> {}
 
 impl<T> RawVec<T> {
     fn new() -> Self {
-        assert!(
-            std::mem::align_of::<T>() != 0,
-            "Zero-Sized-Types are not allowed to create Vec"
-        );
+        // if the size of T is 0, we set the capacity to be i32::MAX
+        let cap = if std::mem::size_of::<T>() == 0 { !0 } else { 0 };
         RawVec {
             ptr: NonNull::dangling(),
-            cap: 0,
+            cap,
             _marker: PhantomData,
         }
     }
 
     fn grow(&mut self) {
+        assert!(std::mem::size_of::<T>() != 0, "capacity overflow");
         let new_cap = if self.cap == 0 { 1 } else { self.cap * 2 };
         let new_layout = alloc::Layout::array::<T>(new_cap).unwrap();
 
@@ -56,6 +57,19 @@ impl<T> RawVec<T> {
     }
 }
 
+impl<T> Drop for RawVec<T> {
+    fn drop(&mut self) {
+        if self.cap != 0 && std::mem::size_of::<T>() != 0 {
+            let layout = alloc::Layout::array::<T>(self.cap).unwrap();
+            unsafe {
+                alloc::dealloc(self.ptr.as_ptr() as *mut u8, layout);
+            }
+        }
+    }
+}
+
+
+#[derive(Debug)]
 pub struct MyVec<T> {
     buf: RawVec<T>,
     len: usize,
@@ -128,14 +142,25 @@ impl<T> MyVec<T> {
     pub fn into_iter(self) -> IntoIter<T> {
         unsafe {
             let buf = std::ptr::read(&self.buf);
-            let len = self.len;
+            let iter = RawValIter::new(&self);
 
             std::mem::forget(self);
             // take ownership of self without running its destructor
             IntoIter {
-                start: buf.ptr.as_ptr(),
-                end: buf.ptr.as_ptr().add(len),
+                iter,
                 _buf: buf,
+            }
+        }
+    }
+
+    pub fn drain(&mut self) -> Drain<T> {
+        unsafe {
+            let iter = RawValIter::new(&self);
+            // std::mem::forget(self);
+            self.len = 0;
+            Drain {
+                iter,
+                vec: PhantomData
             }
         }
     }
@@ -162,44 +187,101 @@ impl<T> Drop for MyVec<T> {
     }
 }
 
-pub struct IntoIter<T> {
-    _buf: RawVec<T>,
+
+pub struct RawValIter<T> {
     start: *const T,
-    end: *const T,
+    end: *const T
 }
 
-impl<T> Iterator for IntoIter<T> {
+impl<T> RawValIter<T> {
+    unsafe fn new(slice:&[T]) -> Self {
+        Self {
+            start: slice.as_ptr(),
+            end: if std::mem::size_of::<T>() == 0 {
+                ((slice.as_ptr() as usize) + slice.len()) as *const _
+            } else if slice.len() == 0 {
+                slice.as_ptr()
+            } else {
+                slice.as_ptr().add(slice.len())
+            }
+        }
+    }
+}
+
+impl<T> Iterator for RawValIter<T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.start == self.end {
             None
         } else {
-            self.start = unsafe { self.start.add(1) };
-            Some(unsafe { std::ptr::read(self.start.sub(1)) })
+            unsafe {
+                let result = std::ptr::read(self.start);
+                self.start = if std::mem::size_of::<T>() == 0 {
+                    ((self.start as usize) + 1) as *const _
+                } else {
+                    self.start.add(1)
+                };
+                Some(result)
+            }
         }
     }
 }
 
-impl<T> DoubleEndedIterator for IntoIter<T> {
+impl<T> DoubleEndedIterator for RawValIter<T> {
     fn next_back(&mut self) -> Option<Self::Item> {
         if self.start == self.end {
             None
         } else {
-            self.end = unsafe { self.end.sub(1) };
-            Some(unsafe { std::ptr::read(self.end) })
-        }
-    }
-}
-impl<T> Drop for RawVec<T> {
-    fn drop(&mut self) {
-        if self.cap != 0 {
-            let layout = alloc::Layout::array::<T>(self.cap).unwrap();
             unsafe {
-                alloc::dealloc(self.ptr.as_ptr() as *mut u8, layout);
+                self.end = if std::mem::size_of::<T>() == 0 {
+                    ((self.end as usize) - 1 ) as *const _
+                } else {
+                    self.end.sub(1)
+                };
+                Some(std::ptr::read(self.end))
             }
         }
     }
+}
+
+pub struct Drain<'a,T> {
+    vec: PhantomData<&'a mut MyVec<T>>,
+    iter: RawValIter<T>
+}
+
+impl<'a, T> Iterator for Drain<'a, T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next()
+    }
+}
+
+impl<'a, T> DoubleEndedIterator for Drain<'a, T> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.iter.next_back()
+    }
+}
+
+impl<'a, T> Drop for Drain<'a, T> {
+    fn drop(&mut self) {
+        for _ in &mut *self { }
+    }
+}
+
+pub struct IntoIter<T> {
+    _buf: RawVec<T>,
+    iter: RawValIter<T>
+}
+
+impl<T> Iterator for IntoIter<T> {
+    type Item = T;
+    fn next(&mut self) -> Option<Self::Item> { self.iter.next() }
+}
+
+impl<T> DoubleEndedIterator for IntoIter<T> {
+    fn next_back(&mut self) -> Option<Self::Item> { self.iter.next_back() }
 }
 
 impl<T> Drop for IntoIter<T> {
@@ -326,6 +408,60 @@ mod tests {
         assert_eq!(it.next_back(), Some(5));
         assert_eq!(it.next_back(), Some(4));
         assert_eq!(it.next(), Some(3));
+        assert_eq!(it.next(), None);
+        assert_eq!(it.next_back(), None);
+    }
+
+    #[test]
+    fn test_drain() {
+        let mut v: MyVec<i32> = MyVec::new();
+        v.push(1);
+        v.push(2);
+        v.push(3);
+        v.push(4);
+        v.push(5);
+        let mut it = v.drain();
+        assert_eq!(it.next(), Some(1));
+        assert_eq!(it.next(), Some(2));
+        assert_eq!(it.next_back(), Some(5));
+        assert_eq!(it.next_back(), Some(4));
+        assert_eq!(it.next(), Some(3));
+        assert_eq!(it.next(), None);
+        assert_eq!(it.next_back(), None);
+    }
+
+    #[test]
+    fn test_zst_drain() {
+        let mut v: MyVec<()> = MyVec::new();
+        v.push(());
+        v.push(());
+        v.push(());
+        v.push(());
+        v.push(());
+        let mut it = v.drain();
+        assert_eq!(it.next(), Some(()));
+        assert_eq!(it.next(), Some(()));
+        assert_eq!(it.next_back(), Some(()));
+        assert_eq!(it.next(), Some(()));
+        assert_eq!(it.next_back(), Some(()));
+        assert_eq!(it.next(), None);
+        assert_eq!(it.next_back(), None);
+    }
+
+    #[test]
+    fn test_zst_iter() {
+        let mut v: MyVec<()> = MyVec::new();
+        v.push(());
+        v.push(());
+        v.push(());
+        v.push(());
+        v.push(());
+        let mut it = v.into_iter();
+        assert_eq!(it.next(), Some(()));
+        assert_eq!(it.next(), Some(()));
+        assert_eq!(it.next_back(), Some(()));
+        assert_eq!(it.next(), Some(()));
+        assert_eq!(it.next_back(), Some(()));
         assert_eq!(it.next(), None);
         assert_eq!(it.next_back(), None);
     }
