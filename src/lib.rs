@@ -1,6 +1,6 @@
+use std::alloc;
 use std::ops::{Deref, DerefMut};
 use std::{marker::PhantomData, ptr::NonNull};
-use std::alloc;
 
 pub struct MyVec<T> {
     /// 1. NonNull<T> will never be Null
@@ -9,20 +9,23 @@ pub struct MyVec<T> {
     cap: usize,
     len: usize,
     /// Pretending to own T for dropck later
-    _marker: PhantomData<T>
+    _marker: PhantomData<T>,
 }
 
-unsafe impl <T: Sync>Sync for MyVec<T>{}
-unsafe impl <T: Send>Send for MyVec<T>{}
+unsafe impl<T: Sync> Sync for MyVec<T> {}
+unsafe impl<T: Send> Send for MyVec<T> {}
 
 impl<T> MyVec<T> {
     pub fn new() -> Self {
-        assert!(std::mem::align_of::<T>() != 0, "Zero-Sized-Types are not allowed to create Vec");
+        assert!(
+            std::mem::align_of::<T>() != 0,
+            "Zero-Sized-Types are not allowed to create Vec"
+        );
         MyVec {
             ptr: NonNull::dangling(),
             cap: 0,
             len: 0,
-            _marker: PhantomData
+            _marker: PhantomData,
         }
     }
 
@@ -32,22 +35,21 @@ impl<T> MyVec<T> {
 
         // ptr::offset takes an `isize` parameter which is the max number of units of T a pointer
         // can possibly reach
-        assert!(new_layout.size() <= isize::MAX as usize, "Allocation too large");
+        assert!(
+            new_layout.size() <= isize::MAX as usize,
+            "Allocation too large"
+        );
 
         let new_ptr = if self.cap == 0 {
-            unsafe {
-                alloc::alloc(new_layout)
-            }
+            unsafe { alloc::alloc(new_layout) }
         } else {
             let old_layout = alloc::Layout::array::<T>(self.cap).unwrap();
             let old_ptr = self.ptr.as_ptr() as *mut u8;
-            unsafe {
-                alloc::realloc(old_ptr, old_layout, new_cap)
-            }
+            unsafe { alloc::realloc(old_ptr, old_layout, new_cap) }
         };
 
         // if allocation failed, None will be returned
-        self.ptr = match NonNull::new(new_ptr as *mut T){
+        self.ptr = match NonNull::new(new_ptr as *mut T) {
             Some(p) => p,
             None => {
                 alloc::handle_alloc_error(new_layout);
@@ -57,7 +59,9 @@ impl<T> MyVec<T> {
     }
 
     pub fn push(&mut self, ele: T) {
-        if self.len == self.cap { self.grow(); }
+        if self.len == self.cap {
+            self.grow();
+        }
         unsafe {
             std::ptr::write(self.ptr.as_ptr().add(self.len), ele);
         }
@@ -70,9 +74,39 @@ impl<T> MyVec<T> {
             None
         } else {
             self.len -= 1;
-            unsafe {
-                Some(std::ptr::read(self.ptr.as_ptr().add(self.len)))
-            }
+            unsafe { Some(std::ptr::read(self.ptr.as_ptr().add(self.len))) }
+        }
+    }
+
+    pub fn insert(&mut self, idx: usize, ele: T) {
+        if idx >= self.len {
+            return;
+        }
+        if self.len == self.cap {
+            self.grow();
+        }
+        unsafe {
+            let ptr = self.ptr.as_ptr().add(idx);
+            let new_ptr = self.ptr.as_ptr().add(idx + 1);
+            let count = self.len - idx;
+            std::ptr::copy(ptr, new_ptr, count);
+            std::ptr::write(ptr, ele);
+            self.len += 1;
+        }
+    }
+
+    pub fn remove(&mut self, idx: usize) -> T {
+        if self.len == 0 || idx >= self.len {
+            panic!("Index out of bound")
+        }
+        unsafe {
+            let ptr = self.ptr.as_ptr().add(idx + 1);
+            let new_ptr = self.ptr.as_ptr().add(idx);
+            let item = new_ptr.read();
+            let count = self.len - idx - 1;
+            std::ptr::copy(ptr, new_ptr, count);
+            self.len -= 1;
+            return item;
         }
     }
 }
@@ -81,17 +115,13 @@ impl<T> Deref for MyVec<T> {
     type Target = [T];
 
     fn deref(&self) -> &Self::Target {
-        unsafe {
-            std::slice::from_raw_parts(self.ptr.as_ptr(), self.len)
-        }
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
     }
 }
 
 impl<T> DerefMut for MyVec<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe {
-            std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len)
-        }
+        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
     }
 }
 
@@ -99,28 +129,30 @@ impl<T> Drop for MyVec<T> {
     fn drop(&mut self) {
         // if self.cap == 0, nothing has been allocated
         if self.cap != 0 {
-            // this could be removed when T:!Drop as in the elements don't need to be dropped 
+            // this could be removed when T:!Drop as in the elements don't need to be dropped
             while let Some(_) = self.pop() {}
             unsafe {
-                std::alloc::dealloc(self.ptr.as_ptr() as *mut u8, alloc::Layout::array::<T>(self.cap).unwrap())
+                std::alloc::dealloc(
+                    self.ptr.as_ptr() as *mut u8,
+                    alloc::Layout::array::<T>(self.cap).unwrap(),
+                )
             }
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
     use super::MyVec;
     #[test]
     fn create_new_success() {
-        let v:MyVec<i32> = MyVec::new();
+        let v: MyVec<i32> = MyVec::new();
         assert!(std::mem::size_of_val(&v) != 0);
     }
     #[test]
     #[should_panic]
     fn create_new_fail() {
-        let v:MyVec<()> = MyVec::new();
+        let v: MyVec<()> = MyVec::new();
         assert!(std::mem::size_of_val(&v) == 0);
     }
 
@@ -180,6 +212,36 @@ mod tests {
         v.push(2);
         v.push(3);
         v[4] = 4;
-        v.len()
+    }
+
+    #[test]
+    fn test_insert() {
+        let mut v: MyVec<i32> = MyVec::new();
+        v.push(1);
+        v.push(2);
+        v.push(3);
+        v.insert(2, 9);
+        assert_eq!(v[3], 3);
+        assert_eq!(v[2], 9);
+        assert_eq!(v.len(), 4);
+    }
+
+    #[test]
+    fn test_remove_success() {
+        let mut v: MyVec<i32> = MyVec::new();
+        v.push(1);
+        v.push(2);
+        assert_eq!(v.remove(0), 1);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0], 2);
+    }
+
+    #[should_panic]
+    #[test]
+    fn test_remove_fail() {
+        let mut v: MyVec<i32> = MyVec::new();
+        v.push(1);
+        v.push(2);
+        v.remove(2);
     }
 }
