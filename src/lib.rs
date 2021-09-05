@@ -79,9 +79,7 @@ impl<T> MyVec<T> {
     }
 
     pub fn insert(&mut self, idx: usize, ele: T) {
-        if idx >= self.len {
-            return;
-        }
+        assert!(idx <= self.len, "index out of bounds");
         if self.len == self.cap {
             self.grow();
         }
@@ -96,9 +94,7 @@ impl<T> MyVec<T> {
     }
 
     pub fn remove(&mut self, idx: usize) -> T {
-        if self.len == 0 || idx >= self.len {
-            panic!("Index out of bound")
-        }
+        assert!(idx < self.len, "index out of bounds");
         unsafe {
             let ptr = self.ptr.as_ptr().add(idx + 1);
             let new_ptr = self.ptr.as_ptr().add(idx);
