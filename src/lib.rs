@@ -84,6 +84,19 @@ impl<T> MyVec<T> {
     }
 }
 
+impl<T> Drop for MyVec<T> {
+    fn drop(&mut self) {
+        // if self.cap == 0, nothing has been allocated
+        if self.cap != 0 {
+            // this could be removed when T:!Drop as in the elements don't need to be dropped 
+            while let Some(_) = self.pop() {}
+            unsafe {
+                std::alloc::dealloc(self.ptr.as_ptr() as *mut u8, alloc::Layout::array::<T>(self.cap).unwrap())
+            }
+        }
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
